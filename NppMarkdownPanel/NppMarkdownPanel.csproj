@@ -66,6 +66,9 @@
     <StartAction>Program</StartAction>
     <StartProgram Condition="'$(Platform)'=='x64'">$(ProgramW6432)\Notepad++\notepad++.exe</StartProgram>
     <StartProgram Condition="'$(Platform)'=='x86'">$(MSBuildProgramFiles32)\Notepad++\notepad++.exe</StartProgram>
+    <NppRoot Condition="'$(Platform)'=='x64'">$(ProgramW6432)\Notepad++</NppRoot>
+    <NppRoot Condition="'$(Platform)'=='x86'">$(MSBuildProgramFiles32)\Notepad++</NppRoot>
+    <NppPluginsDir>$(NppRoot)\plugins\NppMarkdownPanel</NppPluginsDir>
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="System" />
@@ -173,18 +176,23 @@
     <ProjectReference Include="..\MarkdigWrapper\MarkdigWrapper.csproj">
       <Project>{00858d38-b221-40b2-90f4-e029a1affe5a}</Project>
       <Name>MarkdigWrapper</Name>
-      <Private>False</Private>
+      <Private>True</Private>
     </ProjectReference>
     <ProjectReference Include="..\PanelCommon\PanelCommon.csproj">
       <Project>{a52a6264-26ec-4af6-9031-53b99ae4f65a}</Project>
       <Name>PanelCommon</Name>
-      <Private>False</Private>
+      <Private>True</Private>
     </ProjectReference>
     <ProjectReference Include="..\Webview2Viewer\Webview2Viewer.csproj">
       <Project>{5EEC55BE-F283-4F9D-A2FD-F9050BD17B59}</Project>
       <Name>Webview2Viewer</Name>
-      <Private>False</Private>
+      <Private>True</Private>
     </ProjectReference>
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2">
+      <Version>1.0.3537.50</Version>
+    </PackageReference>
   </ItemGroup>
   <Import Project="$(MSBuildBinPath)\Microsoft.CSharp.targets" />
   <Import Project="$(MSBuildProjectDirectory)\PluginInfrastructure\DllExport\NppPlugin.DllExport.targets" />
@@ -192,6 +200,43 @@
     <PostBuildEvent>
     </PostBuildEvent>
   </PropertyGroup>
+  <!-- Copy all copy-local refs (NuGet + project DLLs) into bin\*\lib -->
+  <Target Name="PostBuild_CopyDepsToLib" AfterTargets="Build">
+    <!-- 1) Gather everything MSBuild marked as copy-local -->
+    <ItemGroup>
+      <LibAssemblies Include="@(ReferenceCopyLocalPaths)" />
+      <LibAssemblies Remove="$(TargetPath)" />
+    </ItemGroup>
+    <!-- 2) Create lib\ and copy -->
+    <MakeDir Directories="$(TargetDir)lib" />
+    <Copy SourceFiles="@(LibAssemblies)" DestinationFolder="$(TargetDir)lib\" SkipUnchangedFiles="true" />
+    <!-- 3) Ensure WebView2 native loader is present (x64 path; change to win-x86 if needed) -->
+    <ItemGroup>
+      <WebView2Loader Include="$(NuGetPackageRoot)microsoft.web.webview2\**\runtimes\win-x64\native\WebView2Loader.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(WebView2Loader)" DestinationFolder="$(TargetDir)lib\" SkipUnchangedFiles="true" Condition="Exists('%(WebView2Loader.Identity)')" />
+  </Target>
+  <Target Name="InstallToNotepadPP" AfterTargets="Build" Condition="Exists('$(NppRoot)')">
+    <Message Importance="high" Text="&gt;&gt;&gt; InstallToNotepadPP → $(NppPluginsDir)" />
+    <!-- Stop Notepad++ so files aren’t locked (ignore if not running) -->
+    <Exec Command="taskkill /IM notepad++.exe /F" ContinueOnError="true" />
+    <!-- Create plugins\<TargetName>\lib -->
+    <MakeDir Directories="$(NppPluginsDir)\lib" />
+    <!-- Copy main DLL -->
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(NppPluginsDir)" SkipUnchangedFiles="true" />
+    <!-- Copy extras if present -->
+    <ItemGroup>
+      <ExtraFiles Include="$(TargetDir)style.css;$(TargetDir)style-dark.css;$(TargetDir)README.md;$(TargetDir)License.txt" Condition="Exists('%(ExtraFiles.Identity)')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(ExtraFiles)" DestinationFolder="$(NppPluginsDir)" SkipUnchangedFiles="true" />
+    <!-- Copy all dependency DLLs from bin\...\lib\ -->
+    <ItemGroup>
+      <LibFiles Include="$(TargetDir)lib\**\*.*" Condition="Exists('$(TargetDir)lib')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(LibFiles)" DestinationFiles="@(LibFiles->'$(NppPluginsDir)\lib\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
+    <!-- Relaunch Notepad++ -->
+    <!--Exec Command="&quot;$(NppRoot)\notepad++.exe&quot;" /-->
+  </Target>
   <!-- To modify your build process, add your task inside one of the targets below and uncomment it. 
        Other similar extension points exist, see Microsoft.Common.targets.
   <Target Name="BeforeBuild">

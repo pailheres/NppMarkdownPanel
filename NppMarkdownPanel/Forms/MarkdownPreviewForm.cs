@@ -7,6 +7,8 @@ using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text.RegularExpressions;
+using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Webview2Viewer;
@@ -32,6 +34,26 @@ namespace NppMarkdownPanel.Forms
             </html>
             ";
 
+        // inject Mermaid only into the browser preview (and optionally export)
+        const string MermaidScript = 
+            @"<script type=""module"">
+              import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+                window.__renderMermaid = () => {
+                  const nodes = document.querySelectorAll('pre code.language-mermaid, pre code.mermaid');
+                  nodes.forEach(code => {
+                    const graph = code.textContent;
+                    const pre = code.closest('pre') || code;
+                    const div = document.createElement('div');
+                    div.className = 'mermaid';
+                    div.textContent = graph;
+                    pre.replaceWith(div);
+                  });
+                  mermaid.initialize({ startOnLoad: false });
+                  mermaid.run({ querySelector: '.mermaid' });
+                };
+                document.addEventListener('DOMContentLoaded', () => { try { window.__renderMermaid(); } catch(e) {} });
+              </script>";
+
         const string MSG_NO_SUPPORTED_FILE_EXT = "<h3>The current file <u>{0}</u> has no valid Markdown file extension.</h3><div>Valid file extensions:{1}</div>";
 
         private Task<RenderResult> renderTask;
@@ -42,6 +64,94 @@ namespace NppMarkdownPanel.Forms
         private IWebbrowserControl webbrowserControl;
         private IWebbrowserControl webview1Instance;
         private IWebbrowserControl webview2Instance;
+
+        private static readonly Regex IncludeRe =
+    new Regex(@"<!--\s*@include\s+""(?<path>[^""]+)""\s*(?<opts>[^>]*)-->", RegexOptions.IgnoreCase);
+
+        private string ExpandIncludes(string text, string currentFilePath, int depth = 0)
+        {
+            if (depth > 12) return text; // prevent infinite recursion
+            string baseDir = string.IsNullOrEmpty(currentFilePath)
+                ? Directory.GetCurrentDirectory()
+                : Path.GetDirectoryName(currentFilePath);
+
+            return IncludeRe.Replace(text, m =>
+            {
+                var spec = m.Groups["path"].Value.Trim();
+                var opts = m.Groups["opts"].Value;
+                int levelOffset = 0;
+
+                // parse optional level=N
+                var lv = Regex.Match(opts ?? "", @"\blevel\s*=\s*(?<n>-?\d+)");
+                if (lv.Success) int.TryParse(lv.Groups["n"].Value, out levelOffset);
+
+                // split out #section-id
+                string filePart = spec, section = null;
+                int hash = spec.IndexOf('#');
+                if (hash >= 0) { filePart = spec.Substring(0, hash); section = spec.Substring(hash + 1); }
+
+                string full = Path.GetFullPath(Path.Combine(baseDir, filePart));
+                if (!File.Exists(full)) return $"<!-- include not found: {spec} -->";
+
+                string content = File.ReadAllText(full);
+
+                // recursively expand inner includes
+                content = ExpandIncludes(content, full, depth + 1);
+
+                // if a section is requested, extract it (very simple: from heading with id/text match until next same/greater level)
+                if (!string.IsNullOrEmpty(section))
+                    content = ExtractSectionByIdOrTitle(content, section);
+
+                // apply heading offset
+                if (levelOffset != 0)
+                    content = Regex.Replace(content, @"(?m)^(#{1,6})(\s)", m2 =>
+                    {
+                        int n = Math.Max(1, Math.Min(6, m2.Groups[1].Value.Length + levelOffset));
+                        return new string('#', n) + m2.Groups[2].Value;
+                    });
+
+                return content;
+            });
+        }
+
+        // (Optional) very simple section extractor: matches ATX headings with id anchors like {#id} or GitHub-style (#id)
+        private string ExtractSectionByIdOrTitle(string md, string section)
+        {
+            // try explicit attribute: ### Title {#section}
+            var re = new Regex(@"(?ms)^(?<h>#{1,6})\s+(?<t>.+?)\s*(?:\{#(?<id>[^}]+)\})?\s*$");
+            var lines = md.Split('\n');
+            var sb = new StringBuilder();
+            bool copy = false;
+            int startLevel = 0;
+
+            for (int i = 0; i < lines.Length; i++)
+            {
+                var line = lines[i];
+                var m = re.Match(line);
+                if (m.Success)
+                {
+                    var lvl = m.Groups["h"].Value.Length;
+                    var id = m.Groups["id"].Success ? m.Groups["id"].Value.Trim() : null;
+                    var title = Regex.Replace(m.Groups["t"].Value, @"\s*\{#.*\}\s*$", "").Trim();
+
+                    // normalize GitHub-style id for title
+                    string ghId = Regex.Replace(title.ToLowerInvariant(), @"[^\w\- ]+", "")
+                                       .Replace(' ', '-');
+
+                    if (!copy && (string.Equals(section, id, StringComparison.OrdinalIgnoreCase) ||
+                                  string.Equals(section, ghId, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        copy = true; startLevel = lvl;
+                    }
+                    else if (copy && lvl <= startLevel)
+                    {
+                        break; // reached next peer or higher heading
+                    }
+                }
+                if (copy) sb.AppendLine(line);
+            }
+            return copy ? sb.ToString() : $"<!-- section not found: {section} -->";
+        }
 
         public void UpdateSettings(Settings settings)
         {
@@ -149,11 +259,19 @@ namespace NppMarkdownPanel.Forms
                 return new RenderResult(invalidExtensionMessage, invalidExtensionMessage, invalidExtensionMessageBody, markdownStyleContent);
             }
 
-            var resultForBrowser = markdownService.ConvertToHtml(currentText, filepath, true);
-            var resultForExport = markdownService.ConvertToHtml(currentText, null, false);
+            // ⬇️ NEW: expand <!-- @include "file.md" --> before converting to HTML
+            var expanded = ExpandIncludes(currentText, filepath);
+
+            var resultForBrowser = markdownService.ConvertToHtml(expanded, filepath, true);
+            var resultForExport = markdownService.ConvertToHtml(expanded, null, false);
 
             var markdownHtmlBrowser = string.Format(DEFAULT_HTML_BASE, Path.GetFileName(filepath), markdownStyleContent, defaultBodyStyle, resultForBrowser);
             var markdownHtmlFileExport = string.Format(DEFAULT_HTML_BASE, Path.GetFileName(filepath), markdownStyleContent, defaultBodyStyle, resultForExport);
+
+            markdownHtmlBrowser = markdownHtmlBrowser.Replace("</body>", MermaidScript + "</body>");
+            // if you also want it in exported HTML, uncomment the next line
+            // markdownHtmlFileExport = markdownHtmlFileExport.Replace("</body>", MermaidScript + "</body>");
+
             return new RenderResult(markdownHtmlBrowser, markdownHtmlFileExport, resultForBrowser, markdownStyleContent);
         }
 
