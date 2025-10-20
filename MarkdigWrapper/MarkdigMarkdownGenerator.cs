@@ -36,6 +36,7 @@ namespace MarkdigWrapper
                 // Syntax Highlighting
                 .UseSyntaxHighlighting()
                 .UsePreciseSourceLocation()
+                .UseMathematics()
                 .Build();
             try
             {

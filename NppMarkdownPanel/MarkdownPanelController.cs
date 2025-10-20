@@ -365,9 +365,12 @@ namespace NppMarkdownPanel
 
         private bool IsDarkModeEnabled()
         {
-            // NPPM_ISDARKMODEENABLED (NPPMSG + 107)
-            IntPtr ret = Win32.SendMessage(PluginBase.nppData._nppHandle, (uint)(Constants.NPPMSG + 107), Unused, Unused);
-            return ret.ToInt32() == 1;
+            //// NPPM_ISDARKMODEENABLED (NPPMSG + 107)
+            //IntPtr ret = Win32.SendMessage(PluginBase.nppData._nppHandle, (uint)(Constants.NPPMSG + 107), Unused, Unused);
+            //return ret.ToInt32() == 1;
+
+            //force light mode
+            return false;
         }
 
 

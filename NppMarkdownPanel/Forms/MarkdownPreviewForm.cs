@@ -18,24 +18,29 @@ namespace NppMarkdownPanel.Forms
     public partial class MarkdownPreviewForm : Form, IViewerInterface
     {
         const string DEFAULT_HTML_BASE =
-         @"<!DOCTYPE html>
-            <html>
-                <head>                    
-                    <meta http-equiv=""X-UA-Compatible"" content=""IE=edge""></meta>
-                    <meta http-equiv=""content-type"" content=""text/html; charset=utf-8""></meta>
-                    <title>{0}</title>
-                    <style type=""text/css"">
-                    {1}
-                    </style>
-                </head>
-                <body class=""markdown-body"" style=""{2}"">
-                {3}
-                </body>
-            </html>
-            ";
+        @"<!DOCTYPE html>
+          <html>
+            <head>
+              <meta http-equiv=""X-UA-Compatible"" content=""IE=edge"">
+              <meta http-equiv=""content-type"" content=""text/html; charset=utf-8"">
+              <meta name=""color-scheme"" content=""light"">
+              <title>{0}</title>
+              <style type=""text/css"">
+                /* keep UA in light mode and force white canvas */
+                :root {{ color-scheme: light; }}
+                html, body {{ background:#fff !important; color:#111 !important; }}
+                .mermaid {{ background:#fff !important; color:#111 !important; }}
+                {1}
+              </style>
+            </head>
+            <body class=""markdown-body"" style=""{2}"">
+            {3}
+            </body>
+          </html>
+          ";
 
         // inject Mermaid only into the browser preview (and optionally export)
-        const string MermaidScript = 
+        const string MermaidScript =
             @"<script type=""module"">
               import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
                 window.__renderMermaid = () => {
@@ -48,11 +53,39 @@ namespace NppMarkdownPanel.Forms
                     div.textContent = graph;
                     pre.replaceWith(div);
                   });
-                  mermaid.initialize({ startOnLoad: false });
+                  mermaid.initialize({ startOnLoad: true, theme: 'default' });  // not 'dark'
                   mermaid.run({ querySelector: '.mermaid' });
                 };
                 document.addEventListener('DOMContentLoaded', () => { try { window.__renderMermaid(); } catch(e) {} });
               </script>";
+
+        const string MathJaxScript = @"
+<script>
+  window.MathJax = {
+    tex: {
+      inlineMath: [['$','$'], ['\\(','\\)']],
+      displayMath: [['$$','$$'], ['\\[','\\]']],
+      processEscapes: true,
+      tags: 'ams'
+    },
+    options: {
+      skipHtmlTags: ['script','noscript','style','textarea','pre','code']
+    },
+    startup: { typeset: false }   // we'll call it manually when ready
+  };
+</script>
+<script src=""https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"" defer></script>
+<script>
+  (function waitMJ(){
+    // Wait for MathJax to finish bootstrapping, then typeset the document
+    if (window.MathJax && MathJax.startup && MathJax.typesetPromise) {
+      MathJax.startup.promise.then(function(){ MathJax.typesetPromise(); });
+    } else {
+      setTimeout(waitMJ, 50);
+    }
+  })();
+</script>";
+
 
         const string MSG_NO_SUPPORTED_FILE_EXT = "<h3>The current file <u>{0}</u> has no valid Markdown file extension.</h3><div>Valid file extensions:{1}</div>";
 
@@ -268,9 +301,9 @@ namespace NppMarkdownPanel.Forms
             var markdownHtmlBrowser = string.Format(DEFAULT_HTML_BASE, Path.GetFileName(filepath), markdownStyleContent, defaultBodyStyle, resultForBrowser);
             var markdownHtmlFileExport = string.Format(DEFAULT_HTML_BASE, Path.GetFileName(filepath), markdownStyleContent, defaultBodyStyle, resultForExport);
 
-            markdownHtmlBrowser = markdownHtmlBrowser.Replace("</body>", MermaidScript + "</body>");
+            markdownHtmlBrowser = markdownHtmlBrowser.Replace("</body>", MathJaxScript + MermaidScript + "</body>");
             // if you also want it in exported HTML, uncomment the next line
-            // markdownHtmlFileExport = markdownHtmlFileExport.Replace("</body>", MermaidScript + "</body>");
+            // markdownHtmlFileExport = markdownHtmlFileExport.Replace("</body>", MathJaxScript + MermaidScript + "</body>");
 
             return new RenderResult(markdownHtmlBrowser, markdownHtmlFileExport, resultForBrowser, markdownStyleContent);
         }
