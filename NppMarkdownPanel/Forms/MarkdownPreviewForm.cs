@@ -3,6 +3,7 @@ using NppMarkdownPanel.Generator;
 using NppMarkdownPanel.Webbrowser;
 using PanelCommon;
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Linq;
@@ -39,26 +40,27 @@ namespace NppMarkdownPanel.Forms
           </html>
           ";
 
-        // inject Mermaid only into the browser preview (and optionally export)
+        // Mermaid (light)
         const string MermaidScript =
             @"<script type=""module"">
               import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
-                window.__renderMermaid = () => {
-                  const nodes = document.querySelectorAll('pre code.language-mermaid, pre code.mermaid');
-                  nodes.forEach(code => {
-                    const graph = code.textContent;
-                    const pre = code.closest('pre') || code;
-                    const div = document.createElement('div');
-                    div.className = 'mermaid';
-                    div.textContent = graph;
-                    pre.replaceWith(div);
-                  });
-                  mermaid.initialize({ startOnLoad: true, theme: 'default' });  // not 'dark'
-                  mermaid.run({ querySelector: '.mermaid' });
-                };
-                document.addEventListener('DOMContentLoaded', () => { try { window.__renderMermaid(); } catch(e) {} });
-              </script>";
+              window.__renderMermaid = () => {
+                const nodes = document.querySelectorAll('pre code.language-mermaid, pre code.mermaid');
+                nodes.forEach(code => {
+                  const graph = code.textContent;
+                  const pre = code.closest('pre') || code;
+                  const div = document.createElement('div');
+                  div.className = 'mermaid';
+                  div.textContent = graph;
+                  pre.replaceWith(div);
+                });
+                mermaid.initialize({ startOnLoad: true, theme: 'default' });
+                mermaid.run({ querySelector: '.mermaid' });
+              };
+              document.addEventListener('DOMContentLoaded', () => { try { window.__renderMermaid(); } catch(e) {} });
+            </script>";
 
+        // MathJax (robust loader; no nullable syntax)
         const string MathJaxScript = @"
 <script>
   window.MathJax = {
@@ -71,13 +73,12 @@ namespace NppMarkdownPanel.Forms
     options: {
       skipHtmlTags: ['script','noscript','style','textarea','pre','code']
     },
-    startup: { typeset: false }   // we'll call it manually when ready
+    startup: { typeset: false }
   };
 </script>
 <script src=""https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"" defer></script>
 <script>
   (function waitMJ(){
-    // Wait for MathJax to finish bootstrapping, then typeset the document
     if (window.MathJax && MathJax.startup && MathJax.typesetPromise) {
       MathJax.startup.promise.then(function(){ MathJax.typesetPromise(); });
     } else {
@@ -86,8 +87,8 @@ namespace NppMarkdownPanel.Forms
   })();
 </script>";
 
-
-        const string MSG_NO_SUPPORTED_FILE_EXT = "<h3>The current file <u>{0}</u> has no valid Markdown file extension.</h3><div>Valid file extensions:{1}</div>";
+        const string MSG_NO_SUPPORTED_FILE_EXT =
+            "<h3>The current file <u>{0}</u> has no valid Markdown file extension.</h3><div>Valid file extensions:{1}</div>";
 
         private Task<RenderResult> renderTask;
 
@@ -98,92 +99,194 @@ namespace NppMarkdownPanel.Forms
         private IWebbrowserControl webview1Instance;
         private IWebbrowserControl webview2Instance;
 
+        // <!-- @include "file.md#id" --> or <!-- @include "file.md{#id .cls}" --> with opts after -->
         private static readonly Regex IncludeRe =
-    new Regex(@"<!--\s*@include\s+""(?<path>[^""]+)""\s*(?<opts>[^>]*)-->", RegexOptions.IgnoreCase);
+            new Regex(@"<!--\s*@include\s+""(?<spec>[^""]+)""\s*(?<opts>[^>]*)-->",
+                      RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        // key=value options parser (e.g., level=2)
+        private static Dictionary<string, string> ParseOpts(string s)
+        {
+            var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (Match m in Regex.Matches(s ?? "", @"(?<k>\w+)\s*=\s*(?:""(?<v>[^""]*)""|(?<v>\S+))"))
+                dict[m.Groups["k"].Value] = m.Groups["v"].Value;
+            return dict;
+        }
 
         private string ExpandIncludes(string text, string currentFilePath, int depth = 0)
         {
-            if (depth > 12) return text; // prevent infinite recursion
+            if (depth > 20) return text; // recursion guard
+
             string baseDir = string.IsNullOrEmpty(currentFilePath)
                 ? Directory.GetCurrentDirectory()
                 : Path.GetDirectoryName(currentFilePath);
 
             return IncludeRe.Replace(text, m =>
             {
-                var spec = m.Groups["path"].Value.Trim();
-                var opts = m.Groups["opts"].Value;
+                var spec = m.Groups["spec"].Value.Trim();
+                var opts = ParseOpts(m.Groups["opts"].Value);
+
+                // heading offset
                 int levelOffset = 0;
-
-                // parse optional level=N
-                var lv = Regex.Match(opts ?? "", @"\blevel\s*=\s*(?<n>-?\d+)");
-                if (lv.Success) int.TryParse(lv.Groups["n"].Value, out levelOffset);
-
-                // split out #section-id
-                string filePart = spec, section = null;
-                int hash = spec.IndexOf('#');
-                if (hash >= 0) { filePart = spec.Substring(0, hash); section = spec.Substring(hash + 1); }
-
-                string full = Path.GetFullPath(Path.Combine(baseDir, filePart));
-                if (!File.Exists(full)) return $"<!-- include not found: {spec} -->";
-
-                string content = File.ReadAllText(full);
-
-                // recursively expand inner includes
-                content = ExpandIncludes(content, full, depth + 1);
-
-                // if a section is requested, extract it (very simple: from heading with id/text match until next same/greater level)
-                if (!string.IsNullOrEmpty(section))
-                    content = ExtractSectionByIdOrTitle(content, section);
-
-                // apply heading offset
-                if (levelOffset != 0)
-                    content = Regex.Replace(content, @"(?m)^(#{1,6})(\s)", m2 =>
-                    {
-                        int n = Math.Max(1, Math.Min(6, m2.Groups[1].Value.Length + levelOffset));
-                        return new string('#', n) + m2.Groups[2].Value;
-                    });
-
-                return content;
-            });
-        }
-
-        // (Optional) very simple section extractor: matches ATX headings with id anchors like {#id} or GitHub-style (#id)
-        private string ExtractSectionByIdOrTitle(string md, string section)
-        {
-            // try explicit attribute: ### Title {#section}
-            var re = new Regex(@"(?ms)^(?<h>#{1,6})\s+(?<t>.+?)\s*(?:\{#(?<id>[^}]+)\})?\s*$");
-            var lines = md.Split('\n');
-            var sb = new StringBuilder();
-            bool copy = false;
-            int startLevel = 0;
-
-            for (int i = 0; i < lines.Length; i++)
-            {
-                var line = lines[i];
-                var m = re.Match(line);
-                if (m.Success)
+                int tmp;
+                string levelStr;
+                if (opts.TryGetValue("level", out levelStr) && int.TryParse(levelStr, out tmp))
                 {
-                    var lvl = m.Groups["h"].Value.Length;
-                    var id = m.Groups["id"].Success ? m.Groups["id"].Value.Trim() : null;
-                    var title = Regex.Replace(m.Groups["t"].Value, @"\s*\{#.*\}\s*$", "").Trim();
+                    levelOffset = tmp;
+                }
 
-                    // normalize GitHub-style id for title
-                    string ghId = Regex.Replace(title.ToLowerInvariant(), @"[^\w\- ]+", "")
-                                       .Replace(' ', '-');
+                // parse "file{#id .class}" or "file#id"
+                string specFile = spec;
+                string wantId = null;
+                string wantClass = null;
 
-                    if (!copy && (string.Equals(section, id, StringComparison.OrdinalIgnoreCase) ||
-                                  string.Equals(section, ghId, StringComparison.OrdinalIgnoreCase)))
+                var brace = Regex.Match(spec, @"^(?<file>[^{}#]+)\{(?<attrs>[^}]*)\}\s*$");
+                if (brace.Success)
+                {
+                    specFile = brace.Groups["file"].Value.Trim();
+                    string attrs = brace.Groups["attrs"].Value.Trim();
+                    var idm = Regex.Match(attrs, @"#(?<id>[\w\-]+)");
+                    if (idm.Success) wantId = idm.Groups["id"].Value;
+                    var cls = Regex.Match(attrs, @"\.(?<c>[\w\-]+)");
+                    if (cls.Success) wantClass = cls.Groups["c"].Value;
+                }
+                else
+                {
+                    int hash = spec.IndexOf('#');
+                    if (hash >= 0)
                     {
-                        copy = true; startLevel = lvl;
-                    }
-                    else if (copy && lvl <= startLevel)
-                    {
-                        break; // reached next peer or higher heading
+                        specFile = spec.Substring(0, hash);
+                        wantId = spec.Substring(hash + 1);
                     }
                 }
-                if (copy) sb.AppendLine(line);
+
+                bool isGlob = specFile.IndexOfAny(new[] { '*', '?' }) >= 0;
+                var outputs = new List<string>();
+
+                if (isGlob)
+                {
+                    string specDir = Path.GetDirectoryName(specFile) ?? "";
+                    string pattern = Path.GetFileName(specFile);
+                    string searchDir = Path.GetFullPath(Path.Combine(baseDir, specDir));
+                    if (!Directory.Exists(searchDir))
+                        return "<!-- include glob dir not found: " + specDir + " -->";
+                    var files = Directory.GetFiles(searchDir, pattern, SearchOption.TopDirectoryOnly).ToList();
+                    files.Sort(StringComparer.OrdinalIgnoreCase);
+                    foreach (var full in files)
+                        outputs.Add(ProcessOne(full, wantId, wantClass, levelOffset, depth));
+                }
+                else
+                {
+                    string full = Path.GetFullPath(Path.Combine(baseDir, specFile));
+                    outputs.Add(ProcessOne(full, wantId, wantClass, levelOffset, depth));
+                }
+
+                return string.Join(Environment.NewLine, outputs.Where(s2 => !string.IsNullOrEmpty(s2)));
+            });
+
+            string ProcessOne(string fullPath, string sectionId, string requireClass, int level, int d)
+            {
+                if (!File.Exists(fullPath))
+                    return "<!-- include not found: " + Path.GetFileName(fullPath) + " -->";
+
+                string content = File.ReadAllText(fullPath);
+
+                // expand nested includes relative to this file
+                content = ExpandIncludes(content, fullPath, d + 1);
+
+                // Extract by id/class if requested
+                if (!string.IsNullOrEmpty(sectionId) || !string.IsNullOrEmpty(requireClass))
+                {
+                    var extracted = ExtractSectionByIdClassOrTitle(content, sectionId, requireClass);
+                    if (extracted != null) content = extracted;
+                    else return "<!-- section not found: " + (sectionId ?? ("." + requireClass)) + " in " + Path.GetFileName(fullPath) + " -->";
+                }
+
+                // Apply heading offset
+                if (level != 0)
+                {
+                    content = Regex.Replace(content, @"(?m)^(#{1,6})(\s+)", m2 =>
+                    {
+                        int n = m2.Groups[1].Value.Length + level;
+                        if (n < 1) n = 1; else if (n > 6) n = 6;
+                        return new string('#', n) + m2.Groups[2].Value;
+                    });
+                }
+
+                return content;
             }
-            return copy ? sb.ToString() : $"<!-- section not found: {section} -->";
+        }
+
+        // Extract section starting at a heading that matches id OR class OR GH slug
+        private static string ExtractSectionByIdClassOrTitle(string md, string wantId, string wantClass)
+        {
+            var re = new Regex(@"^(?<h>#{1,6})\s+(?<title>.+?)(?:\s*\{(?<attrs>[^}]*)\})?\s*$",
+                               RegexOptions.Multiline);
+
+            Func<string, string> Slug = s =>
+            {
+                s = s.ToLowerInvariant();
+                s = Regex.Replace(s, @"[^\w\- ]+", "");
+                s = Regex.Replace(s, @"\s+", "-");
+                return s.Trim('-');
+            };
+
+            Func<string, Tuple<string, HashSet<string>>> ParseAttrs = a =>
+            {
+                string id = null;
+                var classes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                if (!string.IsNullOrWhiteSpace(a))
+                {
+                    foreach (Match m in Regex.Matches(a, @"([#.])([\w\-]+)"))
+                    {
+                        if (m.Groups[1].Value == "#") id = m.Groups[2].Value;
+                        else classes.Add(m.Groups[2].Value);
+                    }
+                }
+                return Tuple.Create(id, classes);
+            };
+
+            int start = -1, end = md.Length, startLevel = 0;
+
+            foreach (Match m in re.Matches(md))
+            {
+                int lvl = m.Groups["h"].Value.Length;
+                string titleRaw = m.Groups["title"].Value;
+                string title = Regex.Replace(titleRaw, @"\s*\{[^}]*\}\s*$", "").Trim();
+                var attrs = m.Groups["attrs"].Success ? m.Groups["attrs"].Value : null;
+
+                var parsed = ParseAttrs(attrs);
+                string id = parsed.Item1;
+                HashSet<string> classes = parsed.Item2;
+
+                string gh = Slug(title);
+
+                bool matches = false;
+                if (!string.IsNullOrEmpty(wantId))
+                    matches = string.Equals(wantId, id, StringComparison.OrdinalIgnoreCase)
+                           || string.Equals(wantId, gh, StringComparison.OrdinalIgnoreCase);
+                if (!matches && !string.IsNullOrEmpty(wantClass))
+                    matches = classes.Contains(wantClass);
+
+                if (start < 0 && matches)
+                {
+                    start = m.Index;
+                    startLevel = lvl;
+                }
+                else if (start >= 0 && lvl <= startLevel)
+                {
+                    end = m.Index; break;
+                }
+            }
+
+            return start >= 0 ? md.Substring(start, end - start) : null;
+        }
+
+        // Legacy wrapper (kept if other code calls it)
+        private string ExtractSectionByIdOrTitle(string md, string section)
+        {
+            var s = ExtractSectionByIdClassOrTitle(md, section, null);
+            return s ?? "<!-- section not found: " + section + " -->";
         }
 
         public void UpdateSettings(Settings settings)
@@ -245,7 +348,6 @@ namespace NppMarkdownPanel.Forms
         private void InitRenderingEngine(Settings settings)
         {
             panel1.Controls.Clear();
-          
 
             if (settings.IsRenderingEngineIE11())
             {
@@ -292,7 +394,7 @@ namespace NppMarkdownPanel.Forms
                 return new RenderResult(invalidExtensionMessage, invalidExtensionMessage, invalidExtensionMessageBody, markdownStyleContent);
             }
 
-            // ⬇️ NEW: expand <!-- @include "file.md" --> before converting to HTML
+            // expand <!-- @include ... -->
             var expanded = ExpandIncludes(currentText, filepath);
 
             var resultForBrowser = markdownService.ConvertToHtml(expanded, filepath, true);
@@ -301,22 +403,29 @@ namespace NppMarkdownPanel.Forms
             var markdownHtmlBrowser = string.Format(DEFAULT_HTML_BASE, Path.GetFileName(filepath), markdownStyleContent, defaultBodyStyle, resultForBrowser);
             var markdownHtmlFileExport = string.Format(DEFAULT_HTML_BASE, Path.GetFileName(filepath), markdownStyleContent, defaultBodyStyle, resultForExport);
 
-            markdownHtmlBrowser = markdownHtmlBrowser.Replace("</body>", MathJaxScript + MermaidScript + "</body>");
-            // if you also want it in exported HTML, uncomment the next line
-            // markdownHtmlFileExport = markdownHtmlFileExport.Replace("</body>", MathJaxScript + MermaidScript + "</body>");
+            // inject scripts at the very end
+            var injections = MathJaxScript + MermaidScript;
+            markdownHtmlBrowser = RobustAppendBeforeBodyEnd(markdownHtmlBrowser, injections);
+            // markdownHtmlFileExport = RobustAppendBeforeBodyEnd(markdownHtmlFileExport, injections); // enable if needed
 
             return new RenderResult(markdownHtmlBrowser, markdownHtmlFileExport, resultForBrowser, markdownStyleContent);
         }
 
+        private static string RobustAppendBeforeBodyEnd(string html, string injection)
+        {
+            int i = html.LastIndexOf("</body>", StringComparison.OrdinalIgnoreCase);
+            if (i >= 0) return html.Insert(i, injection);
+            return html + injection + "</body></html>";
+        }
+
         private string GetCssContent(string filepath)
         {
-            // Path of plugin directory
             var cssContent = "";
-
             var assemblyPath = Path.GetDirectoryName(Assembly.GetAssembly(GetType()).Location);
 
             var defaultCss = settings.IsDarkModeEnabled ? Settings.DefaultDarkModeCssFile : Settings.DefaultCssFile;
             var customCssFile = settings.IsDarkModeEnabled ? settings.CssDarkModeFileName : settings.CssFileName;
+
             if (File.Exists(customCssFile))
             {
                 cssContent = File.ReadAllText(customCssFile);
@@ -342,12 +451,14 @@ namespace NppMarkdownPanel.Forms
                 {
                     webbrowserControl.SetContent(renderedText.Result.ResultForBrowser, renderedText.Result.ResultBody, renderedText.Result.ResultStyle, currentFilePath);
                     htmlContentForExport = renderedText.Result.ResultForExport;
+
                     if (!String.IsNullOrWhiteSpace(settings.HtmlFileName))
                     {
-                        bool valid = Utils.ValidateFileSelection(settings.HtmlFileName, out string fullPath, out string error, "HTML Output");
+                        string fullPath, error;
+                        bool valid = Utils.ValidateFileSelection(settings.HtmlFileName, out fullPath, out error, "HTML Output");
                         if (valid)
                         {
-                            settings.HtmlFileName = fullPath; // the validation was run against this path, so we want to make sure the state of the preview matches that
+                            settings.HtmlFileName = fullPath;
                             writeHtmlContentToFile(settings.HtmlFileName);
                         }
                     }
@@ -357,10 +468,7 @@ namespace NppMarkdownPanel.Forms
                 renderTask.Start();
             }
         }
-        /// <summary>
-        /// Makes and displays a screenshot of the current browser content to prevent it from flickering 
-        /// while loading updated content
-        /// </summary>
+
         private void MakeAndDisplayScreenShot()
         {
             Bitmap bm = webbrowserControl.MakeScreenshot();
@@ -369,7 +477,6 @@ namespace NppMarkdownPanel.Forms
                 pictureBoxScreenshot.Image = bm;
                 pictureBoxScreenshot.Visible = true;
             }
-
         }
 
         private void HideScreenshotAndShowBrowser()
@@ -389,8 +496,6 @@ namespace NppMarkdownPanel.Forms
         protected override void WndProc(ref Message m)
         {
             wndProcCallback(ref m);
-
-            //Continue the processing, as we only toggle
             base.WndProc(ref m);
         }
 
@@ -429,7 +534,6 @@ namespace NppMarkdownPanel.Forms
             catch (Exception)
             {
             }
-
             return matchExtensionList;
         }
 
