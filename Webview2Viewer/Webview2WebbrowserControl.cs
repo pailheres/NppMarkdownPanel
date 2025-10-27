@@ -40,16 +40,11 @@ namespace Webview2Viewer
         public async void Initialize(int zoomLevel)
         {
             var cacheDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), CONFIG_FOLDER_NAME, "webview2");
-            //var props = new Microsoft.Web.WebView2.WinForms.CoreWebView2CreationProperties();
-            //props.UserDataFolder = cacheDir;
-            //props.AdditionalBrowserArguments = "--disable-web-security --allow-file-access-from-files --allow-file-access";
             webView = new Microsoft.Web.WebView2.WinForms.WebView2();
             var opt = new CoreWebView2EnvironmentOptions();
-            //opt.
             environment = await CoreWebView2Environment.CreateAsync(null, cacheDir, opt);
             await webView.EnsureCoreWebView2Async(environment);
 
-            //webView.CreationProperties = props;
             webView.AccessibleName = "webView";
             webView.Name = "webView";
             webView.ZoomFactor = ConvertToZoomFactor(zoomLevel);
@@ -63,8 +58,6 @@ namespace Webview2Viewer
             webView.ZoomFactor = ConvertToZoomFactor(zoomLevel);
 
             webViewInitialized = true;
-
-            //webView.CoreWebView2InitializationCompleted += WebView_CoreWebView2InitializationCompleted;
         }
 
         public void AddToHost(Control host)
@@ -72,30 +65,25 @@ namespace Webview2Viewer
             host.Controls.Add(webView);
         }
 
-        /*private void WebView_CoreWebView2InitializationCompleted(object sender, CoreWebView2InitializationCompletedEventArgs e)
+        private async void WebView_NavigationCompleted(object sender, CoreWebView2NavigationCompletedEventArgs e)
         {
-            webViewInitialized = true;
-        }*/
+            // After NavigateToString completes, (re)render Mermaid first, then MathJax, then restore scroll.
+            try
+            {
+                await RetypesetAsync();
+            }
+            catch { }
 
-        private void WebView_NavigationCompleted(object sender, CoreWebView2NavigationCompletedEventArgs e)
-        {
             ExecuteWebviewAction(new Action(async () =>
             {
-                await webView.ExecuteScriptAsync("window.scrollBy(0, " + lastVerticalScroll + " )");
+                try
+                {
+                    await webView.ExecuteScriptAsync("window.scrollBy(0, " + lastVerticalScroll + " )");
+                }
+                catch { }
                 if (RenderingDoneAction != null) RenderingDoneAction();
             }));
         }
-
-        /*public async Task SetScreenshot(PictureBox pictureBox)
-        {
-            pictureBox.Image = null;
-            if (!webViewInitialized) return;
-            var ms = new MemoryStream();
-            await webView.CoreWebView2.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, ms);
-            var screenshot = new Bitmap(ms);
-            pictureBox.Image = screenshot;
-            pictureBox.Visible = true;
-        }*/
 
         public Bitmap MakeScreenshot()
         {
@@ -125,7 +113,6 @@ namespace Webview2Viewer
             "var elementPosition = element.getBoundingClientRect().top;\n" +
             "var offsetPosition = elementPosition + window.pageYOffset - headerOffset;\n" +
             "window.scrollTo({{top: offsetPosition}});";
-
 
         public void ScrollToElementWithLineNo(int lineNo)
         {
@@ -157,11 +144,10 @@ namespace Webview2Viewer
                 fullReload = true;
             }
 
-            // >>> ADD THIS: inject <base> so relative URLs work
+            // Ensure <base> so relative URLs resolve against the MD folder
             const string baseTag = "<base href=\"http://markdownpanel-virtualhost/\">";
             if (content.IndexOf("<base", StringComparison.OrdinalIgnoreCase) < 0)
             {
-                // insert right after <head>
                 int headIdx = content.IndexOf("<head", StringComparison.OrdinalIgnoreCase);
                 if (headIdx >= 0)
                 {
@@ -171,25 +157,31 @@ namespace Webview2Viewer
                 }
                 else
                 {
-                    // fallback: prepend a head
                     content = "<head>" + baseTag + "</head>" + content;
                 }
             }
-            // <<< END ADD
 
             if (!fullReload && currentBody != null && currentStyle != null)
             {
+                bool didChange = false;
+
                 if (currentBody != body)
                 {
                     currentBody = body;
+                    didChange = true;
                     ExecuteWebviewAction(new Action(async () =>
                     {
-                        await webView.ExecuteScriptAsync("document.body.innerHTML = '" + HttpUtility.JavaScriptStringEncode(currentBody) + "'");
+                        await webView.ExecuteScriptAsync(
+                            "document.body.innerHTML = '" + HttpUtility.JavaScriptStringEncode(currentBody) + "'"
+                        );
+                        // Re-render Mermaid then MathJax after DOM change
+                        try { await RetypesetAsync(); } catch { }
                     }));
                 }
                 if (currentStyle != style)
                 {
                     currentStyle = style;
+                    didChange = true;
                     ExecuteWebviewAction(new Action(async () =>
                     {
                         await webView.ExecuteScriptAsync(
@@ -198,8 +190,16 @@ namespace Webview2Viewer
                             "style.type = 'text/css'; \n" +
                             "style.textContent = '" + HttpUtility.JavaScriptStringEncode(currentStyle) + "'; \n" +
                             "document.head.appendChild(style); \n"
-                            );
+                        );
+                        // Style changes can affect layout; re-typeset for good measure
+                        try { await RetypesetAsync(); } catch { }
                     }));
+                }
+
+                // If neither body nor style changed, do nothing.
+                if (!didChange)
+                {
+                    // No-op
                 }
             }
             else
@@ -257,17 +257,39 @@ namespace Webview2Viewer
             return "EDGE";
         }
 
-
         private void ExecuteWebviewAction(Action action)
         {
             try
             {
                 webView.Invoke(action);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
             }
         }
 
+        // --- Added: centralized re-render for Mermaid then MathJax ---
+        private async Task RetypesetAsync()
+        {
+            if (webView == null || webView.CoreWebView2 == null) return;
+
+            const string js = @"
+(async function(){
+  try {
+    if (window.__renderMermaid) {
+      await window.__renderMermaid();
+    }
+  } catch(e) { /* ignore */ }
+
+  try {
+    if (window.retypesetMath) {
+      await window.retypesetMath();
+    } else if (window.MathJax && MathJax.typesetPromise) {
+      await MathJax.typesetPromise();
+    }
+  } catch(e) { /* ignore */ }
+})();";
+            await webView.ExecuteScriptAsync(js);
+        }
     }
 }
