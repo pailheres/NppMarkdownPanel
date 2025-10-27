@@ -25,7 +25,11 @@ namespace MarkdigWrapper
         {
             var sb = new StringBuilder();
             var htmlWriter = new StringWriter(sb);
+
             var htmlRenderer = new HtmlRenderer(htmlWriter);
+            htmlRenderer.EnableHtmlForBlock = true;   // Allow block-level HTML
+            htmlRenderer.EnableHtmlForInline = true;  // Allow inline HTML
+            htmlRenderer.EnableHtmlEscape = false;
 
             var pipeline = new MarkdownPipelineBuilder()
                 .UseAdvancedExtensions()

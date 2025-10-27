@@ -16,7 +16,7 @@ namespace PanelCommon
         void SetZoomLevel(int zoomLevel);
         void ScrollToElementWithLineNo(int lineNo);
         string GetRenderingEngineName();
-
+        void NavigateToPreview(string filePath);
         Bitmap MakeScreenshot();
 
         Action<string> StatusTextChangedAction { get; set; }

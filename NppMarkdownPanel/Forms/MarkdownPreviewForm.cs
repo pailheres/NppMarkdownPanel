@@ -1,4 +1,4 @@
-﻿using NppMarkdownPanel.Entities;
+using NppMarkdownPanel.Entities;
 using NppMarkdownPanel.Generator;
 using NppMarkdownPanel.Webbrowser;
 using PanelCommon;
@@ -400,6 +400,11 @@ namespace NppMarkdownPanel.Forms
             var resultForBrowser = markdownService.ConvertToHtml(expanded, filepath, true);
             var resultForExport = markdownService.ConvertToHtml(expanded, null, false);
 
+            // To replace image relative path, with virtual host plus relative path, so image is correctly rendered
+            var currentPath = Path.GetDirectoryName(filepath);
+            var virtualHostUrl = "http://markdownpanel-virtualhost/";
+            resultForBrowser = Regex.Replace(resultForBrowser, "(<img[^>]+src=\")([^\"/]+)(\")", $"$1{virtualHostUrl}$2$3");
+
             var markdownHtmlBrowser = string.Format(DEFAULT_HTML_BASE, Path.GetFileName(filepath), markdownStyleContent, defaultBodyStyle, resultForBrowser);
             var markdownHtmlFileExport = string.Format(DEFAULT_HTML_BASE, Path.GetFileName(filepath), markdownStyleContent, defaultBodyStyle, resultForExport);
 
@@ -449,7 +454,8 @@ namespace NppMarkdownPanel.Forms
                 renderTask = new Task<RenderResult>(() => RenderHtmlInternal(currentText, filepath));
                 renderTask.ContinueWith((renderedText) =>
                 {
-                    webbrowserControl.SetContent(renderedText.Result.ResultForBrowser, renderedText.Result.ResultBody, renderedText.Result.ResultStyle, currentFilePath);
+                    string baseUri = new Uri(Path.GetDirectoryName(filepath) + Path.DirectorySeparatorChar).AbsoluteUri;
+                    webbrowserControl.SetContent(renderedText.Result.ResultForBrowser, renderedText.Result.ResultBody, renderedText.Result.ResultStyle, baseUri);
                     htmlContentForExport = renderedText.Result.ResultForExport;
 
                     if (!String.IsNullOrWhiteSpace(settings.HtmlFileName))

@@ -136,23 +136,48 @@ namespace Webview2Viewer
             }));
         }
 
+        public void NavigateToPreview(string filePath)
+        {
+            if (!webViewInitialized) return;
+
+            var currentPath = Path.GetDirectoryName(filePath);
+            ExecuteWebviewAction(() =>
+            {
+                webView.CoreWebView2.SetVirtualHostNameToFolderMapping(
+                    virtualHostName,
+                    currentPath,
+                    CoreWebView2HostResourceAccessKind.Allow);
+
+                webView.CoreWebView2.Navigate($"{virtualHostProtocol}{virtualHostName}/{Path.GetFileName(filePath)}");
+            });
+        }
+
         public void SetContent(string content, string body, string style, string currentDocumentPath)
         {
             if (!webViewInitialized) return;
 
             var currentPath = Path.GetDirectoryName(currentDocumentPath);
-            var replaceFileMapping = "file:///" + currentPath.Replace('\\', '/');
 
+            // Always set virtual host mapping before rendering
+            ExecuteWebviewAction(() =>
+            {
+                webView.CoreWebView2.SetVirtualHostNameToFolderMapping(
+                    virtualHostName,
+                    currentPath,
+                    CoreWebView2HostResourceAccessKind.Allow);
+            });
+
+            var replaceFileMapping = "file:///" + currentPath.Replace('\\', '/');
             content = content.Replace(replaceFileMapping, virtualHostProtocol + virtualHostName);
             body = body.Replace(replaceFileMapping, virtualHostProtocol + virtualHostName);
+
+            // Save the HTML to a file in the same folder as the Markdown file
+            var htmlFilePath = Path.Combine(currentPath, "__preview.html");
+            File.WriteAllText(htmlFilePath, content);
 
             var fullReload = false;
             if (this.currentDocumentPath != currentDocumentPath)
             {
-                ExecuteWebviewAction(new Action(() =>
-                {
-                    webView.CoreWebView2.SetVirtualHostNameToFolderMapping(virtualHostName, currentPath, CoreWebView2HostResourceAccessKind.Allow);
-                }));
                 this.currentDocumentPath = currentDocumentPath;
                 fullReload = true;
             }
@@ -178,7 +203,7 @@ namespace Webview2Viewer
                             "style.type = 'text/css'; \n" +
                             "style.textContent = '" + HttpUtility.JavaScriptStringEncode(currentStyle) + "'; \n" +
                             "document.head.appendChild(style); \n"
-                            );
+                        );
                     }));
                 }
             }
@@ -188,7 +213,8 @@ namespace Webview2Viewer
                 currentStyle = style;
                 ExecuteWebviewAction(new Action(() =>
                 {
-                    webView.NavigateToString(content);
+                    // Navigate to the HTML file using the virtual host
+                    webView.CoreWebView2.Navigate("http://markdownpanel-virtualhost/__preview.html");
                 }));
             }
         }

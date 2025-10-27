@@ -38,6 +38,8 @@ namespace NppMarkdownPanel.Webbrowser
             this.webBrowserPreview.StatusTextChanged += new System.EventHandler(this.webBrowserPreview_StatusTextChanged);
         }
 
+        public void NavigateToPreview(string filePath) { }
+
         public void AddToHost(Control host)
         {
             host.Controls.Add(this.webBrowserPreview);
