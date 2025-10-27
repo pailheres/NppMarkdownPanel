@@ -157,6 +157,26 @@ namespace Webview2Viewer
                 fullReload = true;
             }
 
+            // >>> ADD THIS: inject <base> so relative URLs work
+            const string baseTag = "<base href=\"http://markdownpanel-virtualhost/\">";
+            if (content.IndexOf("<base", StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                // insert right after <head>
+                int headIdx = content.IndexOf("<head", StringComparison.OrdinalIgnoreCase);
+                if (headIdx >= 0)
+                {
+                    int headClose = content.IndexOf('>', headIdx);
+                    if (headClose >= 0)
+                        content = content.Substring(0, headClose + 1) + baseTag + content.Substring(headClose + 1);
+                }
+                else
+                {
+                    // fallback: prepend a head
+                    content = "<head>" + baseTag + "</head>" + content;
+                }
+            }
+            // <<< END ADD
+
             if (!fullReload && currentBody != null && currentStyle != null)
             {
                 if (currentBody != body)

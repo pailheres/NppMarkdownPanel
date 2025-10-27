@@ -65,19 +65,21 @@ namespace NppMarkdownPanel.Forms
 <script>
   window.MathJax = {
     tex: {
-      inlineMath: [['$','$'], ['\\(','\\)']],
-      displayMath: [['$$','$$'], ['\\[','\\]']],
+      inlineMath: [['$', '$'], ['\\(', '\\)']],
+      displayMath: [['$$', '$$'], ['\\[', '\\]']],
       processEscapes: true,
-      tags: 'ams'
+      processEnvironments: true,   // align/gather/cases
+      tags: 'ams'                  // numbering + \eqref
     },
     options: {
       skipHtmlTags: ['script','noscript','style','textarea','pre','code']
     },
-    startup: { typeset: false }
+    startup: { typeset: false }     // we will typeset manually
   };
 </script>
 <script src=""https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"" defer></script>
 <script>
+  // Wait for MathJax to be ready once
   (function waitMJ(){
     if (window.MathJax && MathJax.startup && MathJax.typesetPromise) {
       MathJax.startup.promise.then(function(){ MathJax.typesetPromise(); });
@@ -85,6 +87,14 @@ namespace NppMarkdownPanel.Forms
       setTimeout(waitMJ, 50);
     }
   })();
+
+  // Helper the C# side can call after DOM mutations:
+  window.retypesetMath = function(){
+    if (window.MathJax && MathJax.typesetPromise) {
+      return MathJax.typesetPromise();
+    }
+    return Promise.resolve();
+  };
 </script>";
 
         const string MSG_NO_SUPPORTED_FILE_EXT =
@@ -403,12 +413,28 @@ namespace NppMarkdownPanel.Forms
             var markdownHtmlBrowser = string.Format(DEFAULT_HTML_BASE, Path.GetFileName(filepath), markdownStyleContent, defaultBodyStyle, resultForBrowser);
             var markdownHtmlFileExport = string.Format(DEFAULT_HTML_BASE, Path.GetFileName(filepath), markdownStyleContent, defaultBodyStyle, resultForExport);
 
-            // inject scripts at the very end
-            var injections = MathJaxScript + MermaidScript;
-            markdownHtmlBrowser = RobustAppendBeforeBodyEnd(markdownHtmlBrowser, injections);
-            // markdownHtmlFileExport = RobustAppendBeforeBodyEnd(markdownHtmlFileExport, injections); // enable if needed
+            // ---- Inject into <head>: base href + MathJax + Mermaid ----
+            var baseTag = MakeBaseHref(filepath);
+            var headInjections = baseTag + MathJaxScript + MermaidScript;
+
+            markdownHtmlBrowser = InjectIntoHead(markdownHtmlBrowser, headInjections);
+            // If you also want export HTML to include math/mermaid, uncomment:
+            // markdownHtmlFileExport = InjectIntoHead(markdownHtmlFileExport, headInjections);
 
             return new RenderResult(markdownHtmlBrowser, markdownHtmlFileExport, resultForBrowser, markdownStyleContent);
+        }
+
+        private static string InjectIntoHead(string html, string toInsert)
+        {
+            int i = html.IndexOf("</head>", StringComparison.OrdinalIgnoreCase);
+            if (i >= 0) return html.Substring(0, i) + toInsert + html.Substring(i);
+
+            // If no <head> found, try to put it before body start
+            int j = html.IndexOf("<body", StringComparison.OrdinalIgnoreCase);
+            if (j >= 0) return "<head>" + toInsert + "</head>" + html;
+
+            // Last fallback: prepend
+            return "<head>" + toInsert + "</head>" + html;
         }
 
         private static string RobustAppendBeforeBodyEnd(string html, string injection)
@@ -436,6 +462,33 @@ namespace NppMarkdownPanel.Forms
             }
 
             return cssContent;
+        }
+
+        private static string MakeBaseHref(string mdPath)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(mdPath)) return string.Empty;
+                if (!System.IO.File.Exists(mdPath)) return string.Empty;
+
+                string dir = System.IO.Path.GetDirectoryName(mdPath);
+                if (string.IsNullOrEmpty(dir)) return string.Empty;
+                if (!System.IO.Directory.Exists(dir)) return string.Empty;
+
+                // Ensure trailing separator so Uri becomes .../ (not .../doc)
+                if (!dir.EndsWith(System.IO.Path.DirectorySeparatorChar.ToString()))
+                {
+                    dir += System.IO.Path.DirectorySeparatorChar;
+                }
+
+                // Convert to file:/// URL with proper escaping
+                var uri = new System.Uri(dir);
+                return "<base href=\"" + uri.AbsoluteUri + "\">";
+            }
+            catch
+            {
+                return string.Empty;
+            }
         }
 
         public void RenderMarkdown(string currentText, string filepath, bool preserveVerticalScrollPosition = true)
